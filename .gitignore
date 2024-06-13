@@ -1,0 +1,11 @@
+**/__pycache__
+.mypy_cache
+build/
+dist/
+*.egg-info/
+*.egg
+*.zip
+*.tar.gz
+profiling_results*
+profiler_trace.json
+docker_history.txt
