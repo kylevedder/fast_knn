@@ -9,7 +9,6 @@ from dataclasses import dataclass
 class _KNN:
     dists: torch.Tensor
     idx: torch.Tensor
-    knn: torch.Tensor | None
 
 
 class _knn_points(Function):
@@ -83,13 +82,6 @@ class _knn_points(Function):
 def knn_points(
     p1: torch.Tensor,
     p2: torch.Tensor,
-    lengths1: torch.Tensor | None = None,
-    lengths2: torch.Tensor | None = None,
-    norm: int = 2,
-    K: int = 1,
-    version: int = -1,
-    return_nn: bool = False,
-    return_sorted: bool = True,
 ) -> _KNN:
     """
     K-Nearest neighbors on point clouds.
@@ -139,77 +131,16 @@ def knn_points(
             of shape (N, P1, K, U).
 
     """
-    if p1.shape[0] != p2.shape[0]:
-        raise ValueError("pts1 and pts2 must have the same batch dimension.")
-    if p1.shape[2] != p2.shape[2]:
-        raise ValueError("pts1 and pts2 must have the same point dimension.")
+    if p1.shape[1] != 3:
+        raise ValueError("pts1 must have 3 point dimension.")
+    if p2.shape[1] != 3:
+        raise ValueError("pts2 must have 3 point dimension.")
 
     p1 = p1.contiguous()
     p2 = p2.contiguous()
 
-    P1 = p1.shape[1]
-    P2 = p2.shape[1]
-
-    if lengths1 is None:
-        lengths1 = torch.full((p1.shape[0],), P1, dtype=torch.int64, device=p1.device)
-    if lengths2 is None:
-        lengths2 = torch.full((p1.shape[0],), P2, dtype=torch.int64, device=p1.device)
+    lengths1 = torch.tensor([p1.shape[0]], dtype=torch.int64, device=p1.device)
+    lengths2 = torch.tensor([p2.shape[0]], dtype=torch.int64, device=p1.device)
 
     p1_dists, p1_idx = _knn_points.apply(p1, p2, lengths1, lengths2)
-
-    p2_nn = None
-    if return_nn:
-        p2_nn = knn_gather(p2, p1_idx, lengths2)
-
-    return _KNN(dists=p1_dists, idx=p1_idx, knn=p2_nn if return_nn else None)
-
-
-def knn_gather(x: torch.Tensor, idx: torch.Tensor, lengths: torch.Tensor | None = None):
-    """
-    A helper function for knn that allows indexing a tensor x with the indices `idx`
-    returned by `knn_points`.
-
-    For example, if `dists, idx = knn_points(p, x, lengths_p, lengths, K)`
-    where p is a tensor of shape (N, L, D) and x a tensor of shape (N, M, D),
-    then one can compute the K nearest neighbors of p with `p_nn = knn_gather(x, idx, lengths)`.
-    It can also be applied for any tensor x of shape (N, M, U) where U != D.
-
-    Args:
-        x: Tensor of shape (N, M, U) containing U-dimensional features to
-            be gathered.
-        idx: LongTensor of shape (N, L, K) giving the indices returned by `knn_points`.
-        lengths: LongTensor of shape (N,) of values in the range [0, M], giving the
-            length of each example in the batch in x. Or None to indicate that every
-            example has length M.
-    Returns:
-        x_out: Tensor of shape (N, L, K, U) resulting from gathering the elements of x
-            with idx, s.t. `x_out[n, l, k] = x[n, idx[n, l, k]]`.
-            If `k > lengths[n]` then `x_out[n, l, k]` is filled with 0.0.
-    """
-    N, M, U = x.shape
-    _N, L, K = idx.shape
-
-    if N != _N:
-        raise ValueError("x and idx must have same batch dimension.")
-
-    if lengths is None:
-        lengths = torch.full((x.shape[0],), M, dtype=torch.int64, device=x.device)
-
-    idx_expanded = idx[:, :, :, None].expand(-1, -1, -1, U)
-    # idx_expanded has shape [N, L, K, U]
-
-    x_out = x[:, :, None].expand(-1, -1, K, -1).gather(1, idx_expanded)
-    # p2_nn has shape [N, L, K, U]
-
-    needs_mask = lengths.min() < K
-    if needs_mask:
-        # mask has shape [N, K], true where idx is irrelevant because
-        # there is less number of points in p2 than K
-        mask = lengths[:, None] <= torch.arange(K, device=x.device)[None]
-
-        # expand mask to shape [N, L, K, U]
-        mask = mask[:, None].expand(-1, L, -1)
-        mask = mask[:, :, :, None].expand(-1, -1, -1, U)
-        x_out[mask] = 0.0
-
-    return x_out
+    return _KNN(dists=p1_dists, idx=p1_idx)

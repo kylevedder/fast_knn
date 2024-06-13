@@ -88,15 +88,14 @@ std::tuple<at::Tensor, at::Tensor> KNearestNeighborIdxCuda(
   at::cuda::CUDAGuard device_guard(p1.device());
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  const auto N = p1.size(0);
-  const auto P1 = p1.size(1);
-  const auto P2 = p2.size(1);
 
-  TORCH_CHECK(p1.size(2) == 3, "Point sets must have 3 dim");
-  TORCH_CHECK(p2.size(2) == 3, "Point sets must have 3 dim");
+  const auto P1 = p1.size(0);
+  const auto P2 = p2.size(0);
+  TORCH_CHECK(p1.size(1) == 3, "Point sets must have 3 dim");
+  TORCH_CHECK(p2.size(1) == 3, "Point sets must have 3 dim");
   auto long_dtype = lengths1.options().dtype(at::kLong);
-  auto idxs = at::zeros({N, P1, 1}, long_dtype);
-  auto dists = at::zeros({N, P1, 1}, p1.options());
+  auto idxs = at::zeros({P1}, long_dtype);
+  auto dists = at::zeros({P1}, p1.options());
 
   if (idxs.numel() == 0) {
     AT_CUDA_CHECK(cudaGetLastError());
@@ -137,10 +136,10 @@ __global__ void KNearestNeighborBackwardKernel(
     const float* __restrict__ grad_dists, // (N, P1, K)
     float* __restrict__ grad_p1, // (N, P1, D)
     float* __restrict__ grad_p2, // (N, P2, D)
-    const size_t N,
     const size_t P1,
-    const size_t P2,
-    const size_t D) {
+    const size_t P2) {
+  const size_t D = 3;
+  const size_t N = 1;
   const size_t K = 1;
   const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t stride = gridDim.x * blockDim.x;
@@ -194,22 +193,17 @@ std::tuple<at::Tensor, at::Tensor> KNearestNeighborBackwardCuda(
   at::cuda::CUDAGuard device_guard(p1.device());
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  const auto N = p1.size(0);
-  const auto P1 = p1.size(1);
-  const auto P2 = p2.size(1);
-  const auto D = p2.size(2);
-  const auto K = idxs.size(2);
-
-  TORCH_CHECK(p1.size(2) == D, "Point sets must have the same last dimension");
-  TORCH_CHECK(idxs.size(0) == N, "KNN idxs must have the same batch dimension");
+  const auto P1 = p1.size(0);
+  const auto P2 = p2.size(0);
+  const auto D = 3;
+  const auto K = 1;
+  
   TORCH_CHECK(
-      idxs.size(1) == P1, "KNN idxs must have the same point dimension as p1");
-  TORCH_CHECK(grad_dists.size(0) == N);
-  TORCH_CHECK(grad_dists.size(1) == P1);
-  TORCH_CHECK(grad_dists.size(2) == K);
+      idxs.size(0) == P1, "KNN idxs must have the same point dimension as p1");
+  TORCH_CHECK(grad_dists.size(0) == P1);
 
-  auto grad_p1 = at::zeros({N, P1, D}, p1.options());
-  auto grad_p2 = at::zeros({N, P2, D}, p2.options());
+  auto grad_p1 = at::zeros({P1, D}, p1.options());
+  auto grad_p2 = at::zeros({P2, D}, p2.options());
 
   if (grad_p1.numel() == 0 || grad_p2.numel() == 0) {
     AT_CUDA_CHECK(cudaGetLastError());
@@ -228,10 +222,8 @@ std::tuple<at::Tensor, at::Tensor> KNearestNeighborBackwardCuda(
       grad_dists.contiguous().data_ptr<float>(),
       grad_p1.data_ptr<float>(),
       grad_p2.data_ptr<float>(),
-      N,
       P1,
-      P2,
-      D);
+      P2);
 
   AT_CUDA_CHECK(cudaGetLastError());
   return std::make_tuple(grad_p1, grad_p2);

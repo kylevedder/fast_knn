@@ -33,9 +33,7 @@ class CoordMLP(torch.nn.Module):
 
 def my_loss_fn(flowed_pc1: torch.Tensor, pc2: torch.Tensor):
     with record_function("loss_computation"):
-        knn_res = custom_knn.knn_points(
-            flowed_pc1.unsqueeze(0), pc2.unsqueeze(0), length_a, length_b
-        )
+        knn_res = custom_knn.knn_points(flowed_pc1, pc2)
     return knn_res.dists.mean()
 
 
@@ -56,12 +54,6 @@ def make_pcs(n_pcs: int) -> list[torch.Tensor]:
     return [_make_pc() for _ in range(n_pcs)]
 
 
-def make_lengths(pc1: torch.Tensor, pc2: torch.Tensor):
-    length_a = torch.tensor([pc1.shape[0]], dtype=torch.int64, device=pc1.device)
-    length_b = torch.tensor([pc2.shape[0]], dtype=torch.int64, device=pc2.device)
-    return length_a, length_b
-
-
 pcs = make_pcs(20)
 model = CoordMLP().cuda()
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -70,7 +62,6 @@ with profile(activities=[ProfilerActivity.CUDA]) as prof:
     for _ in tqdm.tqdm(range(num_epochs)):
         for pc1, pc2 in zip(pcs, pcs[1:]):
             optimizer.zero_grad()
-            length_a, length_b = make_lengths(pc1, pc2)
             flowed_pc1 = model(pc1)
             loss = my_loss_fn(flowed_pc1, pc2)
 
