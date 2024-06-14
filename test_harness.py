@@ -33,8 +33,8 @@ class CoordMLP(torch.nn.Module):
 
 def my_loss_fn(flowed_pc1: torch.Tensor, pc2: torch.Tensor):
     with record_function("loss_computation"):
-        knn_res = custom_knn.knn_points(flowed_pc1, pc2)
-    return knn_res.dists.mean()
+        knn_res = custom_knn.knn_points(flowed_pc1.half(), pc2.half())
+    return knn_res.dists.mean().float()
 
 
 def make_pcs(n_pcs: int) -> list[torch.Tensor]:

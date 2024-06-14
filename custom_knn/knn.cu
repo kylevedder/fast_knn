@@ -33,8 +33,6 @@ template <typename scalar_t, int D, int K>
 __global__ void KNearestNeighborKernel(
     const scalar_t* __restrict__ points1,
     const scalar_t* __restrict__ points2,
-    const int64_t* __restrict__ lengths1,
-    const int64_t* __restrict__ lengths2,
     scalar_t* __restrict__ dists,
     int64_t* __restrict__ idxs,
     const size_t P1,
@@ -54,12 +52,12 @@ __global__ void KNearestNeighborKernel(
     const int64_t n = chunk / chunks_per_cloud;
     const int64_t start_point = blockDim.x * (chunk % chunks_per_cloud);
     int64_t p1 = start_point + threadIdx.x;
-    if (p1 >= lengths1[n])
+    if (p1 >= P1)
       continue;
     for (int d = 0; d < D; ++d) {
       cur_point[d] = points1[n * P1 * D + p1 * D + d];
     }
-    int64_t length2 = lengths2[n];
+    int64_t length2 = P2;
     RegisterMinK<scalar_t, int, K> mink(min_dists, min_idxs);
     for (int p2 = 0; p2 < length2; ++p2) {
       scalar_t dist = 0;
@@ -80,14 +78,11 @@ __global__ void KNearestNeighborKernel(
 
 std::tuple<at::Tensor, at::Tensor> KNearestNeighborIdxCuda(
     const at::Tensor& p1,
-    const at::Tensor& p2,
-    const at::Tensor& lengths1,
-    const at::Tensor& lengths2) {
+    const at::Tensor& p2) {
   // Check inputs are on the same device
-  at::TensorArg p1_t{p1, "p1", 1}, p2_t{p2, "p2", 2},
-      lengths1_t{lengths1, "lengths1", 3}, lengths2_t{lengths2, "lengths2", 4};
+  at::TensorArg p1_t{p1, "p1", 1}, p2_t{p2, "p2", 2};
   at::CheckedFrom c = "KNearestNeighborIdxCuda";
-  at::checkAllSameGPU(c, {p1_t, p2_t, lengths1_t, lengths2_t});
+  at::checkAllSameGPU(c, {p1_t, p2_t});
   at::checkAllSameType(c, {p1_t, p2_t});
 
   // Set the device for the kernel launch based on the device of the input
@@ -99,7 +94,7 @@ std::tuple<at::Tensor, at::Tensor> KNearestNeighborIdxCuda(
   const auto P2 = p2.size(0);
   TORCH_CHECK(p1.size(1) == 3, "Point sets must have 3 dim");
   TORCH_CHECK(p2.size(1) == 3, "Point sets must have 3 dim");
-  auto long_dtype = lengths1.options().dtype(at::kLong);
+  auto long_dtype = p1.options().dtype(at::kLong);
   // Backwards will skip points with idx -1
   auto idxs = at::full({P1}, -1, long_dtype);
   auto dists = at::zeros({P1}, p1.options());
@@ -117,8 +112,6 @@ std::tuple<at::Tensor, at::Tensor> KNearestNeighborIdxCuda(
                                 KNearestNeighborKernel<scalar_t, 3, 1><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
                                     p1.contiguous().data_ptr<scalar_t>(),
                                     p2.contiguous().data_ptr<scalar_t>(),
-                                    lengths1.contiguous().data_ptr<int64_t>(),
-                                    lengths2.contiguous().data_ptr<int64_t>(),
                                     dists.data_ptr<scalar_t>(),
                                     idxs.data_ptr<int64_t>(),
                                     P1,
@@ -136,8 +129,6 @@ template <typename scalar_t>
 __global__ void KNearestNeighborBackwardKernel(
     const scalar_t* __restrict__ p1, // (P1, 3)
     const scalar_t* __restrict__ p2, // (P2, 3)
-    const int64_t* __restrict__ lengths1, // (1,)
-    const int64_t* __restrict__ lengths2, // (1,)
     const int64_t* __restrict__ idxs, // (P1, 3)
     const scalar_t* __restrict__ grad_dists, // (P1, 3)
     scalar_t* __restrict__ grad_p1, // (P1, 3)
@@ -156,8 +147,8 @@ __global__ void KNearestNeighborBackwardKernel(
     const size_t k = rem / D; // k-th nearest neighbor
     const size_t d = rem % D; // d-th dimension in the feature vector
 
-    const size_t num1 = lengths1[n]; // number of valid points in p1 in batch
-    const size_t num2 = lengths2[n]; // number of valid points in p2 in batch
+    const size_t num1 = P1;
+    const size_t num2 = P2;
     if ((p1_idx < num1) && (k < num2)) {
       const scalar_t grad_dist = grad_dists[n * P1 + p1_idx + k];
       // index of point in p2 corresponding to the k-th nearest neighbor
@@ -177,17 +168,14 @@ __global__ void KNearestNeighborBackwardKernel(
 std::tuple<at::Tensor, at::Tensor> KNearestNeighborBackwardCuda(
     const at::Tensor& p1,
     const at::Tensor& p2,
-    const at::Tensor& lengths1,
-    const at::Tensor& lengths2,
     const at::Tensor& idxs,
     const at::Tensor& grad_dists) {
   // Check inputs are on the same device
   at::TensorArg p1_t{p1, "p1", 1}, p2_t{p2, "p2", 2},
-      lengths1_t{lengths1, "lengths1", 3}, lengths2_t{lengths2, "lengths2", 4},
-      idxs_t{idxs, "idxs", 5}, grad_dists_t{grad_dists, "grad_dists", 6};
+      idxs_t{idxs, "idxs", 3}, grad_dists_t{grad_dists, "grad_dists", 4};
   at::CheckedFrom c = "KNearestNeighborBackwardCuda";
   at::checkAllSameGPU(
-      c, {p1_t, p2_t, lengths1_t, lengths2_t, idxs_t, grad_dists_t});
+      c, {p1_t, p2_t, idxs_t, grad_dists_t});
   at::checkAllSameType(c, {p1_t, p2_t, grad_dists_t});
 
   // This is nondeterministic because atomicAdd
@@ -220,8 +208,6 @@ std::tuple<at::Tensor, at::Tensor> KNearestNeighborBackwardCuda(
     KNearestNeighborBackwardKernel<scalar_t><<<blocks, threads, 0, stream>>>(
         p1.contiguous().data_ptr<scalar_t>(),
         p2.contiguous().data_ptr<scalar_t>(),
-        lengths1.contiguous().data_ptr<int64_t>(),
-        lengths2.contiguous().data_ptr<int64_t>(),
         idxs.contiguous().data_ptr<int64_t>(),
         grad_dists.contiguous().data_ptr<scalar_t>(),
         grad_p1.data_ptr<scalar_t>(),

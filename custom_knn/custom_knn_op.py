@@ -22,8 +22,6 @@ class _knn_points(Function):
         ctx,
         p1,
         p2,
-        lengths1,
-        lengths2,
     ):
         """
         K-Nearest neighbors on point clouds.
@@ -58,24 +56,20 @@ class _knn_points(Function):
                 in p2 has fewer than K points and where a cloud in p1 has fewer than P1 points.
         """
 
-        idx, dists = _C.knn_forward(p1, p2, lengths1, lengths2)  # type: ignore
+        idx, dists = _C.knn_forward(
+            p1,
+            p2,
+        )  # type: ignore
 
-        ctx.save_for_backward(p1, p2, lengths1, lengths2, idx)
+        ctx.save_for_backward(p1, p2, idx)
         ctx.mark_non_differentiable(idx)
         return dists, idx
 
     @staticmethod
     @once_differentiable
     def backward(ctx, grad_dists, grad_idx):
-        p1, p2, lengths1, lengths2, idx = ctx.saved_tensors
-        # TODO(gkioxari) Change cast to floats once we add support for doubles.
-        if not (grad_dists.dtype == torch.float32):
-            grad_dists = grad_dists.float()
-        if not (p1.dtype == torch.float32):
-            p1 = p1.float()
-        if not (p2.dtype == torch.float32):
-            p2 = p2.float()
-        grad_p1, grad_p2 = _C.knn_backward(p1, p2, lengths1, lengths2, idx, grad_dists)
+        p1, p2, idx = ctx.saved_tensors
+        grad_p1, grad_p2 = _C.knn_backward(p1, p2, idx, grad_dists)
         return grad_p1, grad_p2, None, None, None, None, None, None
 
 
@@ -139,8 +133,5 @@ def knn_points(
     p1 = p1.contiguous()
     p2 = p2.contiguous()
 
-    lengths1 = torch.tensor([p1.shape[0]], dtype=torch.int64, device=p1.device)
-    lengths2 = torch.tensor([p2.shape[0]], dtype=torch.int64, device=p1.device)
-
-    p1_dists, p1_idx = _knn_points.apply(p1, p2, lengths1, lengths2)
+    p1_dists, p1_idx = _knn_points.apply(p1, p2)
     return _KNN(dists=p1_dists, idx=p1_idx)
