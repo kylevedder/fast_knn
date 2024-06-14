@@ -67,9 +67,9 @@ __global__ void KNearestNeighborKernelTruncated(
         scalar_t norm_diff = diff * diff;
         dist += norm_diff;
       }
-      // if (dist >= max_dist) {
-      //   continue;
-      // }
+      if (dist >= max_dist) {
+        continue;
+      }
       mink.add(dist, p2);
     }
     for (int k = 0; k < mink.size(); ++k) {
