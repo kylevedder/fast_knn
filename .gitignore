@@ -2,6 +2,7 @@
 .mypy_cache
 build/
 dist/
+.vscode/
 *.egg-info/
 *.egg
 *.zip

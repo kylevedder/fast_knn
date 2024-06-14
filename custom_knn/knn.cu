@@ -12,9 +12,11 @@
 #include <float.h>
 #include <iostream>
 #include <tuple>
+#include <ratio>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 #include "mink.cuh"
+
 
 // A chunk of work is blocksize-many points of P1.
 // The number of potential chunks to do is N*(1+(P1-1)/blocksize)
@@ -23,10 +25,8 @@
 // In block b, we work on chunks b, b+gridSize, b+2*gridSize etc .
 // In chunk i, we work on cloud i/chunks_per_cloud on points starting from
 // blocksize*(i%chunks_per_cloud).
-
-
-template <typename scalar_t, int D, int K>
-__global__ void KNearestNeighborKernelV3(
+template <typename scalar_t, int D, int K, typename MaxDist>
+__global__ void KNearestNeighborKernelTruncated(
     const scalar_t* __restrict__ points1,
     const scalar_t* __restrict__ points2,
     const int64_t* __restrict__ lengths1,
@@ -35,11 +35,15 @@ __global__ void KNearestNeighborKernelV3(
     int64_t* __restrict__ idxs,
     const size_t P1,
     const size_t P2) {
+
+  constexpr scalar_t max_dist = static_cast<scalar_t>(MaxDist::num / MaxDist::den);
   // Same idea as V2, but use register indexing for thread-local arrays.
   // Enabling sorting for this version leads to huge slowdowns; I suspect
   // that it forces min_dists into local memory rather than registers.
   // As a result this version is always unsorted.
   scalar_t cur_point[D];
+
+  // Memory backing the RegisterMinK object.
   scalar_t min_dists[K];
   int min_idxs[K];
   const int64_t chunks_per_cloud = (1 + (P1 - 1) / blockDim.x);
@@ -63,6 +67,9 @@ __global__ void KNearestNeighborKernelV3(
         scalar_t norm_diff = diff * diff;
         dist += norm_diff;
       }
+      // if (dist >= max_dist) {
+      //   continue;
+      // }
       mink.add(dist, p2);
     }
     for (int k = 0; k < mink.size(); ++k) {
@@ -94,7 +101,8 @@ std::tuple<at::Tensor, at::Tensor> KNearestNeighborIdxCuda(
   TORCH_CHECK(p1.size(1) == 3, "Point sets must have 3 dim");
   TORCH_CHECK(p2.size(1) == 3, "Point sets must have 3 dim");
   auto long_dtype = lengths1.options().dtype(at::kLong);
-  auto idxs = at::zeros({P1}, long_dtype);
+  // Backwards will skip points with idx -1
+  auto idxs = at::full({P1}, -1, long_dtype);
   auto dists = at::zeros({P1}, p1.options());
 
   if (idxs.numel() == 0) {
@@ -104,9 +112,13 @@ std::tuple<at::Tensor, at::Tensor> KNearestNeighborIdxCuda(
 
   const size_t threads = 256;
   const size_t blocks = 256;
+  
+  // MaxDist is the maximum distance that we will consider, in m^2.
+  // Doing clown town ratio stuff because template must only take integers.
+  using MaxDist = std::ratio<2, 1>;
 
   AT_DISPATCH_FLOATING_TYPES(p1.scalar_type(), "knn_kernel_cuda", ([&] {
-                                KNearestNeighborKernelV3<scalar_t, 3, 1><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+                                KNearestNeighborKernelTruncated<scalar_t, 3, 1, MaxDist><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
                                     p1.contiguous().data_ptr<scalar_t>(),
                                     p2.contiguous().data_ptr<scalar_t>(),
                                     lengths1.contiguous().data_ptr<int64_t>(),
@@ -127,42 +139,41 @@ std::tuple<at::Tensor, at::Tensor> KNearestNeighborIdxCuda(
 
 // TODO(gkioxari) support all data types once AtomicAdd supports doubles.
 // Currently, support is for floats only.
+template <typename scalar_t>
 __global__ void KNearestNeighborBackwardKernel(
-    const float* __restrict__ p1, // (N, P1, D)
-    const float* __restrict__ p2, // (N, P2, D)
-    const int64_t* __restrict__ lengths1, // (N,)
-    const int64_t* __restrict__ lengths2, // (N,)
-    const int64_t* __restrict__ idxs, // (N, P1, K)
-    const float* __restrict__ grad_dists, // (N, P1, K)
-    float* __restrict__ grad_p1, // (N, P1, D)
-    float* __restrict__ grad_p2, // (N, P2, D)
+    const scalar_t* __restrict__ p1, // (P1, 3)
+    const scalar_t* __restrict__ p2, // (P2, 3)
+    const int64_t* __restrict__ lengths1, // (1,)
+    const int64_t* __restrict__ lengths2, // (1,)
+    const int64_t* __restrict__ idxs, // (P1, 3)
+    const scalar_t* __restrict__ grad_dists, // (P1, 3)
+    scalar_t* __restrict__ grad_p1, // (P1, 3)
+    scalar_t* __restrict__ grad_p2, // (P2, 3)
     const size_t P1,
     const size_t P2) {
-  const size_t D = 3;
-  const size_t N = 1;
-  const size_t K = 1;
+  constexpr size_t D = 3;
   const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t stride = gridDim.x * blockDim.x;
 
-  for (size_t i = tid; i < N * P1 * K * D; i += stride) {
-    const size_t n = i / (P1 * K * D); // batch index
-    size_t rem = i % (P1 * K * D);
-    const size_t p1_idx = rem / (K * D); // index of point in p1
-    rem = rem % (K * D);
+  for (size_t i = tid; i < P1 *  D; i += stride) {
+    const size_t n = i / (P1 * D); // batch index
+    size_t rem = i % (P1 * D);
+    const size_t p1_idx = rem / D; // index of point in p1
+    rem = rem % D;
     const size_t k = rem / D; // k-th nearest neighbor
     const size_t d = rem % D; // d-th dimension in the feature vector
 
     const size_t num1 = lengths1[n]; // number of valid points in p1 in batch
     const size_t num2 = lengths2[n]; // number of valid points in p2 in batch
     if ((p1_idx < num1) && (k < num2)) {
-      const float grad_dist = grad_dists[n * P1 * K + p1_idx * K + k];
+      const scalar_t grad_dist = grad_dists[n * P1 + p1_idx + k];
       // index of point in p2 corresponding to the k-th nearest neighbor
-      const int64_t p2_idx = idxs[n * P1 * K + p1_idx * K + k];
+      const int64_t p2_idx = idxs[n * P1 + p1_idx + k];
       // If the index is the pad value of -1 then ignore it
       if (p2_idx == -1) {
         continue;
       }
-      float diff = 2.0 * grad_dist *
+      scalar_t diff = 2.0 * grad_dist *
             (p1[n * P1 * D + p1_idx * D + d] - p2[n * P2 * D + p2_idx * D + d]);
       atomicAdd(grad_p1 + n * P1 * D + p1_idx * D + d, diff);
       atomicAdd(grad_p2 + n * P2 * D + p2_idx * D + d, -1.0f * diff);
@@ -196,8 +207,7 @@ std::tuple<at::Tensor, at::Tensor> KNearestNeighborBackwardCuda(
   const auto P1 = p1.size(0);
   const auto P2 = p2.size(0);
   const auto D = 3;
-  const auto K = 1;
-  
+
   TORCH_CHECK(
       idxs.size(0) == P1, "KNN idxs must have the same point dimension as p1");
   TORCH_CHECK(grad_dists.size(0) == P1);
@@ -213,17 +223,19 @@ std::tuple<at::Tensor, at::Tensor> KNearestNeighborBackwardCuda(
   const int blocks = 64;
   const int threads = 512;
 
-  KNearestNeighborBackwardKernel<<<blocks, threads, 0, stream>>>(
-      p1.contiguous().data_ptr<float>(),
-      p2.contiguous().data_ptr<float>(),
-      lengths1.contiguous().data_ptr<int64_t>(),
-      lengths2.contiguous().data_ptr<int64_t>(),
-      idxs.contiguous().data_ptr<int64_t>(),
-      grad_dists.contiguous().data_ptr<float>(),
-      grad_p1.data_ptr<float>(),
-      grad_p2.data_ptr<float>(),
-      P1,
-      P2);
+  AT_DISPATCH_FLOATING_TYPES(p1.scalar_type(), "knn_kernel_cuda", ([&] {
+    KNearestNeighborBackwardKernel<scalar_t><<<blocks, threads, 0, stream>>>(
+        p1.contiguous().data_ptr<scalar_t>(),
+        p2.contiguous().data_ptr<scalar_t>(),
+        lengths1.contiguous().data_ptr<int64_t>(),
+        lengths2.contiguous().data_ptr<int64_t>(),
+        idxs.contiguous().data_ptr<int64_t>(),
+        grad_dists.contiguous().data_ptr<scalar_t>(),
+        grad_p1.data_ptr<scalar_t>(),
+        grad_p2.data_ptr<scalar_t>(),
+        P1,
+        P2);
+  }));
 
   AT_CUDA_CHECK(cudaGetLastError());
   return std::make_tuple(grad_p1, grad_p2);
