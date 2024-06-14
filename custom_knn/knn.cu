@@ -25,8 +25,8 @@
 // In block b, we work on chunks b, b+gridSize, b+2*gridSize etc .
 // In chunk i, we work on cloud i/chunks_per_cloud on points starting from
 // blocksize*(i%chunks_per_cloud).
-template <typename scalar_t, int D, int K, typename MaxDist>
-__global__ void KNearestNeighborKernelTruncated(
+template <typename scalar_t, int D, int K>
+__global__ void KNearestNeighborKernel(
     const scalar_t* __restrict__ points1,
     const scalar_t* __restrict__ points2,
     const int64_t* __restrict__ lengths1,
@@ -35,8 +35,6 @@ __global__ void KNearestNeighborKernelTruncated(
     int64_t* __restrict__ idxs,
     const size_t P1,
     const size_t P2) {
-
-  constexpr scalar_t max_dist = static_cast<scalar_t>(MaxDist::num / MaxDist::den);
   // Same idea as V2, but use register indexing for thread-local arrays.
   // Enabling sorting for this version leads to huge slowdowns; I suspect
   // that it forces min_dists into local memory rather than registers.
@@ -66,9 +64,6 @@ __global__ void KNearestNeighborKernelTruncated(
         scalar_t diff = cur_point[d] - points2[offset];
         scalar_t norm_diff = diff * diff;
         dist += norm_diff;
-      }
-      if (dist >= max_dist) {
-        continue;
       }
       mink.add(dist, p2);
     }
@@ -112,13 +107,10 @@ std::tuple<at::Tensor, at::Tensor> KNearestNeighborIdxCuda(
 
   const size_t threads = 256;
   const size_t blocks = 256;
-  
-  // MaxDist is the maximum distance that we will consider, in m^2.
-  // Doing clown town ratio stuff because template must only take integers.
-  using MaxDist = std::ratio<2, 1>;
+
 
   AT_DISPATCH_FLOATING_TYPES(p1.scalar_type(), "knn_kernel_cuda", ([&] {
-                                KNearestNeighborKernelTruncated<scalar_t, 3, 1, MaxDist><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+                                KNearestNeighborKernel<scalar_t, 3, 1><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
                                     p1.contiguous().data_ptr<scalar_t>(),
                                     p2.contiguous().data_ptr<scalar_t>(),
                                     lengths1.contiguous().data_ptr<int64_t>(),
@@ -136,9 +128,6 @@ std::tuple<at::Tensor, at::Tensor> KNearestNeighborIdxCuda(
 // ------------------------------------------------------------- //
 //                   Backward Operators                          //
 // ------------------------------------------------------------- //
-
-// TODO(gkioxari) support all data types once AtomicAdd supports doubles.
-// Currently, support is for floats only.
 template <typename scalar_t>
 __global__ void KNearestNeighborBackwardKernel(
     const scalar_t* __restrict__ p1, // (P1, 3)
