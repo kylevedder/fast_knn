@@ -17,6 +17,10 @@
 #include <torch/extension.h>
 #include "mink.cuh"
 
+// Specialization of atomicAdd for c10::Half
+__device__ inline void atomicAdd(c10::Half* address, c10::Half val) {
+    atomicAdd(reinterpret_cast<__half*>(address), static_cast<__half>(val));
+}
 
 // A chunk of work is blocksize-many points of P1.
 // The number of potential chunks to do is N*(1+(P1-1)/blocksize)
@@ -109,7 +113,7 @@ std::tuple<at::Tensor, at::Tensor> KNearestNeighborIdxCuda(
   const size_t blocks = 256;
 
 
-  AT_DISPATCH_FLOATING_TYPES(p1.scalar_type(), "knn_kernel_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES_AND_HALF(p1.scalar_type(), "knn_kernel_cuda", ([&] {
                                 KNearestNeighborKernel<scalar_t, 3, 1><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
                                     p1.contiguous().data_ptr<scalar_t>(),
                                     p2.contiguous().data_ptr<scalar_t>(),
@@ -212,7 +216,7 @@ std::tuple<at::Tensor, at::Tensor> KNearestNeighborBackwardCuda(
   const int blocks = 64;
   const int threads = 512;
 
-  AT_DISPATCH_FLOATING_TYPES(p1.scalar_type(), "knn_kernel_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES_AND_HALF(p1.scalar_type(), "knn_kernel_cuda", ([&] {
     KNearestNeighborBackwardKernel<scalar_t><<<blocks, threads, 0, stream>>>(
         p1.contiguous().data_ptr<scalar_t>(),
         p2.contiguous().data_ptr<scalar_t>(),
